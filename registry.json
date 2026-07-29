@@ -176,11 +176,11 @@
       "category": "network",
       "version": "0.1.0",
       "icon": "radio-tower",
-      "repo": "xichan96/dinotty-plugins",
-      "branch": "main",
+      "repo": "LauJangit/dinotty-plugins",
+      "branch": "feat/cloudflare-tunnel",
       "subdir": "cloudflare-quick-tunnel",
       "author": "dinotty",
-      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/cloudflare-quick-tunnel"
+      "homepage": "https://github.com/LauJangit/dinotty-plugins/tree/feat/cloudflare-tunnel/cloudflare-quick-tunnel"
     },
     {
       "id": "feishu-notify",
