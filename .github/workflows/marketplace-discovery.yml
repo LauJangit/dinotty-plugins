@@ -1,0 +1,48 @@
+name: Marketplace discovery
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: marketplace-discovery
+  cancel-in-progress: false
+
+jobs:
+  discovery:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Start and monitor website discovery
+        uses: actions/github-script@v8
+        env:
+          OFFSITE_URL: ${{ vars.DINOTTY_OFFSITE_URL }}
+          OIDC_AUDIENCE: ${{ vars.DINOTTY_OIDC_AUDIENCE || 'dinotty-offsite' }}
+        with:
+          script: |
+            if (!process.env.OFFSITE_URL) throw new Error('DINOTTY_OFFSITE_URL repository variable is required');
+            const base = process.env.OFFSITE_URL.replace(/\/$/, '');
+            const token = await core.getIDToken(process.env.OIDC_AUDIENCE);
+            const start = await fetch(`${base}/api/internal/github/discovery-runs`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ sourceIds: [] }),
+            });
+            const job = await start.json().catch(() => ({}));
+            if (!start.ok || !job.jobId) throw new Error(`discovery start failed (${start.status})`);
+            for (let attempt = 0; attempt < 120; attempt += 1) {
+              const statusToken = await core.getIDToken(process.env.OIDC_AUDIENCE);
+              const response = await fetch(`${base}/api/internal/github/jobs/${job.jobId}`, {
+                headers: { Authorization: `Bearer ${statusToken}` },
+              });
+              const status = await response.json().catch(() => ({}));
+              if (!response.ok) throw new Error(`discovery status failed (${response.status})`);
+              if (status.status === 'completed') return;
+              if (status.status === 'failed') throw new Error(`discovery failed: ${status.errorCode || 'unknown'}`);
+              await new Promise((resolve) => setTimeout(resolve, 5000));
+            }
+            throw new Error('discovery timed out');
