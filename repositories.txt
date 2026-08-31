@@ -1,0 +1,2 @@
+# Active public community plugin sources.
+# This is the control repository's only authoritative marketplace data file.

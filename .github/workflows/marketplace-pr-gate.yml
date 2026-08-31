@@ -1,0 +1,132 @@
+name: Marketplace PR gate
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: marketplace-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  marketplace-pr-gate:
+    name: marketplace-pr-gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Route and validate changed files from the base workflow
+        id: route
+        uses: actions/github-script@v8
+        env:
+          AUTOMATION_LOGIN: ${{ vars.MARKETPLACE_AUTOMATION_LOGIN }}
+          CODEOWNER_LOGIN: ${{ vars.MARKETPLACE_CODEOWNER_LOGIN || 'LauJangit' }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pull_number = context.payload.pull_request.number;
+            const head = context.payload.pull_request.head.sha;
+            const base = context.payload.pull_request.base.sha;
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner, repo, pull_number, per_page: 100,
+            });
+            const names = files.map((file) => file.filename);
+            const forbidden = /^(audits|revocations|sources|policies|published|keys)(\/|$)/;
+            if (names.some((name) => forbidden.test(name))) {
+              core.setFailed('Marketplace control data belongs in the website database.');
+              return;
+            }
+            const workflowChanged = names.some((name) => name.startsWith('.github/workflows/') || name === '.github/CODEOWNERS');
+            if (workflowChanged) {
+              const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                owner, repo, pull_number, per_page: 100,
+              });
+              const approved = reviews.some((review) =>
+                review.state === 'APPROVED' &&
+                review.commit_id === head &&
+                review.user?.login?.toLowerCase() === process.env.CODEOWNER_LOGIN.toLowerCase()
+              );
+              if (!approved) {
+                core.setFailed('Workflow changes require current-head CODEOWNER approval.');
+                return;
+              }
+            }
+            const sourceChanged = names.includes('repositories.txt');
+            const registryChanged = names.includes('registry.json');
+            if (sourceChanged && (names.length !== 1 || files[0].status === 'removed')) {
+              core.setFailed('A source PR may only modify repositories.txt.');
+              return;
+            }
+            if (registryChanged) {
+              if (names.length !== 1) {
+                core.setFailed('A legacy projection PR may only modify registry.json.');
+                return;
+              }
+              const expected = process.env.AUTOMATION_LOGIN?.toLowerCase();
+              const author = context.payload.pull_request.user.login.toLowerCase();
+              if (!expected || author !== expected) {
+                core.setFailed('registry.json is only updated by the configured automation account.');
+                return;
+              }
+              async function readJson(ref) {
+                const response = await github.rest.repos.getContent({ owner, repo, path: 'registry.json', ref });
+                const text = Buffer.from(response.data.content, 'base64').toString('utf8');
+                return JSON.parse(text);
+              }
+              const previous = await readJson(base);
+              const next = await readJson(head);
+              if (!next || !Array.isArray(next.plugins)) throw new Error('registry.json must contain a plugins array');
+              const oldVersions = new Map((previous.plugins || []).map((plugin) => [plugin.id, plugin.version]));
+              const ids = new Set();
+              for (const plugin of next.plugins) {
+                for (const key of ['id', 'name', 'description', 'version', 'repo', 'branch']) {
+                  if (typeof plugin[key] !== 'string' || !plugin[key]) throw new Error(`registry plugin is missing ${key}`);
+                }
+                if (plugin.branch !== 'main' || ids.has(plugin.id)) throw new Error('registry projection must use unique IDs and branch main');
+                ids.add(plugin.id);
+                const before = oldVersions.get(plugin.id);
+                if (before && before.localeCompare(plugin.version, undefined, { numeric: true }) > 0) {
+                  throw new Error(`version regression for ${plugin.id}`);
+                }
+              }
+            }
+            core.setOutput('source_changed', sourceChanged ? 'true' : 'false');
+            core.setOutput('registry_changed', registryChanged ? 'true' : 'false');
+            core.setOutput('pr_number', String(pull_number));
+            core.setOutput('head_sha', head);
+
+      - name: Ask the website to validate repositories.txt
+        if: steps.route.outputs.source_changed == 'true'
+        id: source-check
+        uses: actions/github-script@v8
+        env:
+          OFFSITE_URL: ${{ vars.DINOTTY_OFFSITE_URL }}
+          OIDC_AUDIENCE: ${{ vars.DINOTTY_OIDC_AUDIENCE || 'dinotty-offsite' }}
+          PR_NUMBER: ${{ steps.route.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.route.outputs.head_sha }}
+        with:
+          script: |
+            if (!process.env.OFFSITE_URL) throw new Error('DINOTTY_OFFSITE_URL repository variable is required');
+            const token = await core.getIDToken(process.env.OIDC_AUDIENCE);
+            const response = await fetch(`${process.env.OFFSITE_URL.replace(/\/$/, '')}/api/internal/github/source-pr-checks`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ prNumber: Number(process.env.PR_NUMBER), headSha: process.env.HEAD_SHA }),
+            });
+            const body = await response.json().catch(() => ({}));
+            if (!response.ok || body.result !== 'passed') throw new Error(`website source check failed (${response.status})`);
+            core.setOutput('auto_merge', body.autoMerge ? 'true' : 'false');
+
+      - name: Enable auto-merge for an approved website automation PR
+        if: steps.source-check.outputs.auto_merge == 'true' || steps.route.outputs.registry_changed == 'true'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const pull = context.payload.pull_request;
+            await github.graphql(`mutation($id: ID!) {
+              enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: SQUASH }) { clientMutationId }
+            }`, { id: pull.node_id });
