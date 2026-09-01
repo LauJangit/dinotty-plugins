@@ -34,35 +34,43 @@ jobs:
             const files = await github.paginate(github.rest.pulls.listFiles, {
               owner, repo, pull_number, per_page: 100,
             });
-            const names = files.map((file) => file.filename);
+            const changedPaths = files.flatMap((file) => [file.filename, file.previous_filename].filter(Boolean));
             const forbidden = /^(audits|revocations|sources|policies|published|keys)(\/|$)/;
-            if (names.some((name) => forbidden.test(name))) {
+            if (changedPaths.some((name) => forbidden.test(name))) {
               core.setFailed('Marketplace control data belongs in the website database.');
               return;
             }
-            const workflowChanged = names.some((name) => name.startsWith('.github/workflows/') || name === '.github/CODEOWNERS');
+            if (files.some((file) => file.status === 'renamed' || file.status === 'copied')) {
+              core.setFailed('Marketplace control files may not be renamed or copied.');
+              return;
+            }
+            const workflowChanged = changedPaths.some((name) => name.startsWith('.github/workflows/') || name === '.github/CODEOWNERS');
             if (workflowChanged) {
               const reviews = await github.paginate(github.rest.pulls.listReviews, {
                 owner, repo, pull_number, per_page: 100,
               });
-              const approved = reviews.some((review) =>
-                review.state === 'APPROVED' &&
-                review.commit_id === head &&
-                review.user?.login?.toLowerCase() === process.env.CODEOWNER_LOGIN.toLowerCase()
-              );
+              const ownerLogin = process.env.CODEOWNER_LOGIN.toLowerCase();
+              const ownerReviews = reviews
+                .filter((review) => review.user?.login?.toLowerCase() === ownerLogin)
+                .sort((left, right) => {
+                  const submitted = (left.submitted_at || '').localeCompare(right.submitted_at || '');
+                  return submitted || (left.id || 0) - (right.id || 0);
+                });
+              const latest = ownerReviews.at(-1);
+              const approved = latest?.state === 'APPROVED' && latest.commit_id === head;
               if (!approved) {
                 core.setFailed('Workflow changes require current-head CODEOWNER approval.');
                 return;
               }
             }
-            const sourceChanged = names.includes('repositories.txt');
-            const registryChanged = names.includes('registry.json');
-            if (sourceChanged && (names.length !== 1 || files[0].status === 'removed')) {
+            const sourceChanged = files.some((file) => file.filename === 'repositories.txt' || file.previous_filename === 'repositories.txt');
+            const registryChanged = files.some((file) => file.filename === 'registry.json' || file.previous_filename === 'registry.json');
+            if (sourceChanged && (files.length !== 1 || files[0].filename !== 'repositories.txt')) {
               core.setFailed('A source PR may only modify repositories.txt.');
               return;
             }
             if (registryChanged) {
-              if (names.length !== 1) {
+              if (files.length !== 1 || files[0].filename !== 'registry.json' || ['removed', 'deleted'].includes(files[0].status)) {
                 core.setFailed('A legacy projection PR may only modify registry.json.');
                 return;
               }
@@ -83,10 +91,16 @@ jobs:
               const oldVersions = new Map((previous.plugins || []).map((plugin) => [plugin.id, plugin.version]));
               const ids = new Set();
               for (const plugin of next.plugins) {
-                for (const key of ['id', 'name', 'description', 'version', 'repo', 'branch']) {
+                for (const key of ['id', 'name', 'description', 'version', 'repo', 'branch', 'subdir']) {
                   if (typeof plugin[key] !== 'string' || !plugin[key]) throw new Error(`registry plugin is missing ${key}`);
                 }
-                if (plugin.branch !== 'main' || ids.has(plugin.id)) throw new Error('registry projection must use unique IDs and branch main');
+                const subdir = plugin.subdir;
+                const safeSubdir = subdir === '.' ||
+                  (!subdir.startsWith('/') && !subdir.includes('\\') &&
+                    subdir.split('/').every((part) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(part) && part !== '.' && part !== '..'));
+                if (plugin.branch !== 'main' || !safeSubdir || ids.has(plugin.id)) {
+                  throw new Error('registry projection must use unique IDs, branch main, and a safe subdir');
+                }
                 ids.add(plugin.id);
                 const before = oldVersions.get(plugin.id);
                 if (before && before.localeCompare(plugin.version, undefined, { numeric: true }) > 0) {
@@ -118,15 +132,10 @@ jobs:
               body: JSON.stringify({ prNumber: Number(process.env.PR_NUMBER), headSha: process.env.HEAD_SHA }),
             });
             const body = await response.json().catch(() => ({}));
-            if (!response.ok || body.result !== 'passed') throw new Error(`website source check failed (${response.status})`);
-            core.setOutput('auto_merge', body.autoMerge ? 'true' : 'false');
-
-      - name: Enable auto-merge for an approved website automation PR
-        if: steps.source-check.outputs.auto_merge == 'true' || steps.route.outputs.registry_changed == 'true'
-        uses: actions/github-script@v8
-        with:
-          script: |
-            const pull = context.payload.pull_request;
-            await github.graphql(`mutation($id: ID!) {
-              enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: SQUASH }) { clientMutationId }
-            }`, { id: pull.node_id });
+            if (!response.ok || !['passed', 'pending'].includes(body.result)) {
+              const reason = body.error?.code || body.error?.message || body.code || body.message || JSON.stringify(body);
+              throw new Error(`website source check failed (${response.status}): ${reason}`);
+            }
+            if (body.result === 'pending') {
+              core.info('Deterministic precheck passed; waiting for manual candidate review before merge.');
+            }
