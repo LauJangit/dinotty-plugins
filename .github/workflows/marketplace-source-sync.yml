@@ -21,11 +21,10 @@ jobs:
       - name: Synchronize the fixed main commit into the website database
         uses: actions/github-script@v8
         env:
-          OFFSITE_URL: ${{ vars.DINOTTY_OFFSITE_URL }}
+          OFFSITE_URL: ${{ vars.DINOTTY_OFFSITE_URL || 'https://www.dinotty.com' }}
           OIDC_AUDIENCE: ${{ vars.DINOTTY_OIDC_AUDIENCE || 'dinotty-offsite' }}
         with:
           script: |
-            if (!process.env.OFFSITE_URL) throw new Error('DINOTTY_OFFSITE_URL repository variable is required');
             const base = process.env.OFFSITE_URL.replace(/\/$/, '');
             const token = await core.getIDToken(process.env.OIDC_AUDIENCE);
             const start = await fetch(`${base}/api/internal/github/source-syncs`, {

@@ -104,13 +104,12 @@ jobs:
         id: source-check
         uses: actions/github-script@v8
         env:
-          OFFSITE_URL: ${{ vars.DINOTTY_OFFSITE_URL }}
+          OFFSITE_URL: ${{ vars.DINOTTY_OFFSITE_URL || 'https://www.dinotty.com' }}
           OIDC_AUDIENCE: ${{ vars.DINOTTY_OIDC_AUDIENCE || 'dinotty-offsite' }}
           PR_NUMBER: ${{ steps.route.outputs.pr_number }}
           HEAD_SHA: ${{ steps.route.outputs.head_sha }}
         with:
           script: |
-            if (!process.env.OFFSITE_URL) throw new Error('DINOTTY_OFFSITE_URL repository variable is required');
             const token = await core.getIDToken(process.env.OIDC_AUDIENCE);
             const response = await fetch(`${process.env.OFFSITE_URL.replace(/\/$/, '')}/api/internal/github/source-pr-checks`, {
               method: 'POST',
