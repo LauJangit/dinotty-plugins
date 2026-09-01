@@ -5,8 +5,8 @@ on:
     types: [opened, synchronize, reopened, edited, ready_for_review]
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
+  pull-requests: read
   id-token: write
 
 concurrency:
@@ -35,7 +35,7 @@ jobs:
               owner, repo, pull_number, per_page: 100,
             });
             const changedPaths = files.flatMap((file) => [file.filename, file.previous_filename].filter(Boolean));
-            const forbidden = /^(audits|revocations|sources|policies|published|keys)(\/|$)/;
+            const forbidden = /^(audits|revocations|sources|policies|published|keys)(\/|$)/i;
             if (changedPaths.some((name) => forbidden.test(name))) {
               core.setFailed('Marketplace control data belongs in the website database.');
               return;
