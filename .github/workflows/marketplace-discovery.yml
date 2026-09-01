@@ -33,14 +33,20 @@ jobs:
               body: JSON.stringify({ sourceIds: [] }),
             });
             const job = await start.json().catch(() => ({}));
-            if (!start.ok || !job.jobId) throw new Error(`discovery start failed (${start.status})`);
+            if (!start.ok || !job.jobId) {
+              const reason = job.error?.code || job.error?.message || job.errorCode || job.message || JSON.stringify(job);
+              throw new Error(`discovery start failed (${start.status}): ${reason}`);
+            }
             for (let attempt = 0; attempt < 120; attempt += 1) {
               const statusToken = await core.getIDToken(process.env.OIDC_AUDIENCE);
               const response = await fetch(`${base}/api/internal/github/jobs/${job.jobId}`, {
                 headers: { Authorization: `Bearer ${statusToken}` },
               });
               const status = await response.json().catch(() => ({}));
-              if (!response.ok) throw new Error(`discovery status failed (${response.status})`);
+              if (!response.ok) {
+                const reason = status.error?.code || status.error?.message || status.errorCode || status.message || JSON.stringify(status);
+                throw new Error(`discovery status failed (${response.status}): ${reason}`);
+              }
               if (status.status === 'completed') return;
               if (status.status === 'failed') throw new Error(`discovery failed: ${status.errorCode || 'unknown'}`);
               await new Promise((resolve) => setTimeout(resolve, 5000));
