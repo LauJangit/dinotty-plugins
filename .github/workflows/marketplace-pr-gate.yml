@@ -16,6 +16,10 @@ concurrency:
 jobs:
   marketplace-pr-gate:
     name: marketplace-pr-gate
+    outputs:
+      auto_merge: ${{ steps['source-check'].outputs.auto_merge }}
+      pr_number: ${{ steps.route.outputs.pr_number }}
+      head_sha: ${{ steps.route.outputs.head_sha }}
     runs-on: ubuntu-latest
     steps:
       - name: Route and validate changed files from the base workflow
@@ -132,6 +136,7 @@ jobs:
               body: JSON.stringify({ prNumber: Number(process.env.PR_NUMBER), headSha: process.env.HEAD_SHA }),
             });
             const body = await response.json().catch(() => ({}));
+            core.setOutput('auto_merge', body.autoMerge === true ? 'true' : 'false');
             if (!response.ok || !['passed', 'pending'].includes(body.result)) {
               const reason = body.error?.code || body.error?.message || body.code || body.message || JSON.stringify(body);
               throw new Error(`website source check failed (${response.status}): ${reason}`);
@@ -139,3 +144,36 @@ jobs:
             if (body.result === 'pending') {
               core.info('Deterministic precheck passed; waiting for manual candidate review before merge.');
             }
+
+  marketplace-pr-auto-merge:
+    name: marketplace-pr-auto-merge
+    needs: marketplace-pr-gate
+    if: ${{ needs['marketplace-pr-gate'].outputs.auto_merge == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    steps:
+      - name: Ask the website to merge the validated source PR
+        uses: actions/github-script@v8
+        env:
+          OFFSITE_URL: ${{ vars.DINOTTY_OFFSITE_URL }}
+          OIDC_AUDIENCE: ${{ vars.DINOTTY_OIDC_AUDIENCE || 'dinotty-offsite' }}
+          PR_NUMBER: ${{ needs['marketplace-pr-gate'].outputs.pr_number }}
+          HEAD_SHA: ${{ needs['marketplace-pr-gate'].outputs.head_sha }}
+        with:
+          script: |
+            if (!process.env.OFFSITE_URL) throw new Error('DINOTTY_OFFSITE_URL repository variable is required');
+            const token = await core.getIDToken(process.env.OIDC_AUDIENCE);
+            const response = await fetch(`${process.env.OFFSITE_URL.replace(/\/$/, '')}/api/internal/github/source-pr-merges`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ prNumber: Number(process.env.PR_NUMBER), headSha: process.env.HEAD_SHA }),
+            });
+            const body = await response.json().catch(() => ({}));
+            if (!response.ok || !['merged', 'already_merged'].includes(body.action)) {
+              const reason = body.error?.code || body.error?.message || body.code || body.message || JSON.stringify(body);
+              throw new Error(`website source merge failed (${response.status}): ${reason}`);
+            }
+            core.info(`Website source PR ${body.action}.`);
