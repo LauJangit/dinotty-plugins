@@ -1,4 +1,4 @@
-name: Marketplace source PR gate
+name: Marketplace PR gate
 
 on:
   pull_request_target:
@@ -10,7 +10,8 @@ permissions:
   id-token: write
 
 jobs:
-  gate:
+  marketplace-pr-gate:
+    name: marketplace-pr-gate
     runs-on: ubuntu-latest
     steps:
       - name: Run source gate
