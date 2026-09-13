@@ -4,9 +4,6 @@ on:
   schedule:
     - cron: '17 * * * *'
   workflow_dispatch:
-  workflow_run:
-    workflows: ['Marketplace source sync']
-    types: [completed]
 
 permissions:
   contents: read
@@ -18,7 +15,6 @@ concurrency:
 
 jobs:
   project:
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Queue registry projection
